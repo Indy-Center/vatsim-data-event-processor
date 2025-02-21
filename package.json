@@ -1,0 +1,26 @@
+{
+  "scripts": {
+    "dev": "nodemon --exec ts-node src/server.ts",
+    "ingest": "ts-node src/scripts/ingestVatsimData.ts",
+    "ingest:loop": "ts-node src/scripts/runIngestLoop.ts",
+    "process": "ts-node src/scripts/processVatsimData.ts",
+    "seed:airports": "ts-node src/scripts/seedAirports.ts",
+    "start": "ts-node",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.4",
+    "@types/rascal": "^10.2.0",
+    "nodemon": "^3.1.9"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "rascal": "^20.1.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3",
+    "winston": "^3.17.0"
+  }
+}
