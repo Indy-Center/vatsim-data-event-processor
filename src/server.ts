@@ -1,6 +1,7 @@
 import logger from "./logger";
 import { BrokerAsPromised } from "rascal";
 import rabbitConfig from "./rabbitConfig";
+import { addListener } from "./controllers";
 
 interface ControllerState {
   data: any;
@@ -30,68 +31,7 @@ async function main() {
     logger.error(`Broker error: ${err}`);
   });
 
-  const controllerSubscription = broker.subscribe("raw.controllers");
-
-  (await controllerSubscription).on(
-    "message",
-    async (message: any, content: any, ackOrNack: any) => {
-      await processRawController(broker, content);
-      await ackOrNack();
-    }
-  );
-
-  // Report controllers as disconnected if their last seen is older than 1 minute.
-  setInterval(async () => {
-    logger.debug("Checking for disconnected controllers");
-    const currentTime = Date.now();
-    const disconnectedControllers = Object.entries(controllerCache).filter(
-      ([key, state]) => {
-        return currentTime - state.lastSeen > GRACE_PERIOD;
-      }
-    );
-
-    logger.debug(
-      `Found ${disconnectedControllers.length} disconnected controllers`
-    );
-
-    for (const [key, state] of disconnectedControllers) {
-      logger.debug(`Reporting controller ${key} as disconnected`);
-      await broker.publish("events.controller.disconnect", {
-        event: "disconnect",
-        timestamp: currentTime,
-        data: state.data,
-      });
-      delete controllerCache[key];
-    }
-  }, 1000 * 60);
-}
-
-async function processRawController(broker: BrokerAsPromised, message: any) {
-  const controller = message.data;
-  const currentTime = Date.now();
-
-  const controllerKey = `${controller.cid}-${controller.callsign}`;
-
-  if (controllerCache[controllerKey]) {
-    logger.debug(
-      `Controller ${controllerKey} is already in cache. Updating last seen.`
-    );
-    controllerCache[controllerKey].lastSeen = currentTime;
-  } else {
-    logger.debug(
-      `Controller ${controllerKey} is not in cache. Adding to cache.`
-    );
-    controllerCache[controllerKey] = {
-      data: controller,
-      lastSeen: currentTime,
-    };
-
-    await broker.publish("events.controller.connect", {
-      event: "connect",
-      data: controller,
-      timestamp: currentTime,
-    });
-  }
+  await addListener(await broker.subscribe("raw.controllers"), broker);
 }
 
 main().catch((error) => {

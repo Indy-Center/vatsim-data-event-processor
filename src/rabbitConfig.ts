@@ -1,8 +1,6 @@
 import rascal, { BindingConfig } from "rascal";
 import { config } from "./config";
 
-const VATSIM_TYPES = ["pilots", "controllers", "atis", "prefiles"];
-
 const queues = {
   "controller-processor-queue": {
     options: {
