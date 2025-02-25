@@ -1,30 +1,37 @@
 import { BrokerAsPromised, SubscriberSessionAsPromised } from "rascal";
 import logger from "./logger";
-import { pick } from "lodash";
-
-const INACTIVE_FLIGHT_PLAN_TIMEOUT = 1000 * 60 * 10; // 10 minutes
-const INACTIVE_FLIGHT_PLAN_CHECK_INTERVAL = 1000 * 60; // 1 minute
-const FLIGHT_PLAN_CACHE: Cache<{
-  pilot: { cid: number; callsign: string };
-  flightPlan: FlightPlan;
-}> = {};
+import { redisService } from "./redis";
 
 export async function addFlightPlanListener(
   subscriptions: SubscriberSessionAsPromised[],
   broker: BrokerAsPromised
 ) {
+  // Initialize Redis and subscribe to expiration events
+  await redisService.connect();
+  await redisService.subscribeToExpiration(async (key) => {
+    const [cid, callsign] = key.split("-");
+    logger.debug(`Flight Plan ${key} expired. Publishing expiration event.`);
+
+    const expiredPlan = await redisService.getFlightPlan(key);
+    if (expiredPlan) {
+      await publishFlightPlanEvent(
+        {
+          event: "expire",
+          pilot: expiredPlan.pilot,
+          flight_plan: expiredPlan.flightPlan,
+          timestamp: Date.now(),
+        },
+        broker
+      );
+    }
+  });
+
   for (const subscription of subscriptions) {
     subscription.on("message", async (_: any, content: any, ackOrNack: any) => {
       await processRawFlightPlan(content?.data, broker);
       await ackOrNack();
     });
   }
-
-  // Check for inactive flight plans periodically
-  setInterval(async () => {
-    logger.debug("Checking for inactive flight plans");
-    await checkForInactiveFlightPlans(broker);
-  }, INACTIVE_FLIGHT_PLAN_CHECK_INTERVAL);
 }
 
 export async function processRawFlightPlan(
@@ -32,14 +39,15 @@ export async function processRawFlightPlan(
   broker: BrokerAsPromised
 ) {
   const key = `${pilot.cid}-${pilot.callsign}`;
-  const cacheEntry = FLIGHT_PLAN_CACHE[key];
+  const existingData = await redisService.getFlightPlan(key);
   const flightPlan = pilot.flight_plan;
 
-  if (cacheEntry) {
+  if (existingData) {
     const hasChanges = detectFlightPlanChanges(
-      cacheEntry.value.flightPlan,
+      existingData.flightPlan,
       flightPlan
     );
+
     if (hasChanges) {
       logger.debug(`Flight Plan ${key} has changed. Publishing update.`);
       await publishFlightPlanEvent(
@@ -52,25 +60,22 @@ export async function processRawFlightPlan(
         broker
       );
 
-      FLIGHT_PLAN_CACHE[key] = {
+      await redisService.setFlightPlan(key, {
         timestamp: Date.now(),
-        value: {
-          pilot: { cid: pilot.cid, callsign: pilot.callsign },
-          flightPlan,
-        },
-      };
+        pilot: { cid: pilot.cid, callsign: pilot.callsign },
+        flightPlan,
+      });
     } else {
-      FLIGHT_PLAN_CACHE[key].timestamp = Date.now();
+      // Just refresh the TTL since we saw this flight plan in the feed
+      await redisService.refreshTTL(key);
     }
   } else {
     logger.debug(`Flight Plan ${key} is not in cache. Adding to cache.`);
-    FLIGHT_PLAN_CACHE[key] = {
+    await redisService.setFlightPlan(key, {
       timestamp: Date.now(),
-      value: {
-        pilot: { cid: pilot.cid, callsign: pilot.callsign },
-        flightPlan,
-      },
-    };
+      pilot: { cid: pilot.cid, callsign: pilot.callsign },
+      flightPlan,
+    });
 
     await publishFlightPlanEvent(
       {
@@ -81,28 +86,6 @@ export async function processRawFlightPlan(
       },
       broker
     );
-  }
-}
-
-async function checkForInactiveFlightPlans(broker: BrokerAsPromised) {
-  const now = Date.now();
-  for (const key in FLIGHT_PLAN_CACHE) {
-    const cacheEntry = FLIGHT_PLAN_CACHE[key];
-    if (now - cacheEntry.timestamp > INACTIVE_FLIGHT_PLAN_TIMEOUT) {
-      logger.debug(`Flight Plan ${key} is inactive. Removing from cache.`);
-
-      delete FLIGHT_PLAN_CACHE[key];
-
-      await publishFlightPlanEvent(
-        {
-          event: "expire",
-          pilot: cacheEntry.value.pilot,
-          flight_plan: cacheEntry.value.flightPlan,
-          timestamp: now,
-        },
-        broker
-      );
-    }
   }
 }
 
@@ -119,8 +102,6 @@ function detectFlightPlanChanges(original: FlightPlan, updated: FlightPlan) {
       original[key as keyof FlightPlan] !== updated[key as keyof FlightPlan]
   );
 }
-
-type Cache<T> = Record<string, { timestamp: number; value: T }>;
 
 type FlightPlanEvent = {
   event: "file" | "update" | "expire";
