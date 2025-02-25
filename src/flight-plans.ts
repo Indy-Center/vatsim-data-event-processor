@@ -9,7 +9,7 @@ export async function addFlightPlanListener(
   // Initialize Redis and subscribe to expiration events
   await redisService.connect();
   await redisService.subscribeToExpiration(async (key) => {
-    const [cid, callsign] = key.split("-");
+    const [cid, callsign, departure, timestamp] = key.split("-");
     logger.debug(`Flight Plan ${key} expired. Publishing expiration event.`);
 
     const expiredPlan = await redisService.getFlightPlan(key);
@@ -28,7 +28,13 @@ export async function addFlightPlanListener(
 
   for (const subscription of subscriptions) {
     subscription.on("message", async (_: any, content: any, ackOrNack: any) => {
-      await processRawFlightPlan(content?.data, broker);
+      if (
+        content?.data?.flight_plan &&
+        content?.data?.flight_plan?.flight_rules === "I"
+      ) {
+        await processRawFlightPlan(content?.data, broker);
+      }
+
       await ackOrNack();
     });
   }
@@ -38,39 +44,71 @@ export async function processRawFlightPlan(
   pilot: Pilot | Prefile,
   broker: BrokerAsPromised
 ) {
-  const key = `${pilot.cid}-${pilot.callsign}`;
-  const existingData = await redisService.getFlightPlan(key);
+  const baseKey = `${pilot.cid}-${pilot.callsign}`;
   const flightPlan = pilot.flight_plan;
 
-  if (existingData) {
-    const hasChanges = detectFlightPlanChanges(
-      existingData.flightPlan,
-      flightPlan
-    );
+  // Get all existing keys for this pilot/callsign combination
+  const existingKeys = await redisService.findKeysByPattern(`${baseKey}*`);
+  let existingMatchFound = false;
 
-    if (hasChanges) {
-      logger.debug(`Flight Plan ${key} has changed. Publishing update.`);
-      await publishFlightPlanEvent(
-        {
-          event: "update",
-          pilot: { cid: pilot.cid, callsign: pilot.callsign },
-          flight_plan: flightPlan,
+  // First check for an exact match (same CID, callsign, and departure)
+  for (const existingKey of existingKeys) {
+    const data = await redisService.getFlightPlan(existingKey);
+    if (data && data.flightPlan.departure === flightPlan.departure) {
+      existingMatchFound = true;
+
+      // If the flight plan has changes, update it
+      if (detectFlightPlanChanges(data.flightPlan, flightPlan)) {
+        logger.debug(`Flight Plan ${existingKey} has changed. Updating.`);
+        await redisService.setFlightPlan(existingKey, {
           timestamp: Date.now(),
-        },
-        broker
-      );
+          pilot: { cid: pilot.cid, callsign: pilot.callsign },
+          flightPlan,
+        });
 
-      await redisService.setFlightPlan(key, {
-        timestamp: Date.now(),
-        pilot: { cid: pilot.cid, callsign: pilot.callsign },
-        flightPlan,
-      });
-    } else {
-      // Just refresh the TTL since we saw this flight plan in the feed
-      await redisService.refreshTTL(key);
+        await publishFlightPlanEvent(
+          {
+            event: "update",
+            pilot: { cid: pilot.cid, callsign: pilot.callsign },
+            flight_plan: flightPlan,
+            timestamp: Date.now(),
+          },
+          broker
+        );
+      } else {
+        // Just refresh TTL if no changes
+        logger.debug(
+          `Flight Plan ${existingKey} still active. Refreshing TTL.`
+        );
+        await redisService.refreshTTL(existingKey);
+      }
+      break;
     }
-  } else {
-    logger.debug(`Flight Plan ${key} is not in cache. Adding to cache.`);
+  }
+
+  // If no matching flight plan found, expire old ones and create new
+  if (!existingMatchFound) {
+    // Expire any existing flight plans for this pilot/callsign
+    for (const existingKey of existingKeys) {
+      const data = await redisService.getFlightPlan(existingKey);
+      if (data) {
+        logger.debug(`Expiring previous flight plan ${existingKey}`);
+        await publishFlightPlanEvent(
+          {
+            event: "expire",
+            pilot: data.pilot,
+            flight_plan: data.flightPlan,
+            timestamp: Date.now(),
+          },
+          broker
+        );
+        await redisService.deleteFlightPlan(existingKey);
+      }
+    }
+
+    // Create new flight plan
+    const key = `${baseKey}-${flightPlan.departure}`;
+    logger.debug(`Creating new flight plan ${key}`);
     await redisService.setFlightPlan(key, {
       timestamp: Date.now(),
       pilot: { cid: pilot.cid, callsign: pilot.callsign },
@@ -97,10 +135,14 @@ async function publishFlightPlanEvent(
 }
 
 function detectFlightPlanChanges(original: FlightPlan, updated: FlightPlan) {
-  return Object.keys(updated).some(
-    (key) =>
-      original[key as keyof FlightPlan] !== updated[key as keyof FlightPlan]
-  );
+  // Handle null or undefined cases
+  if (!original || !updated) return true;
+
+  return Object.keys(updated).some((key) => {
+    const field = key as keyof FlightPlan;
+    // Compare as strings to handle numeric values that might be stored as strings
+    return String(original[field]) !== String(updated[field]);
+  });
 }
 
 type FlightPlanEvent = {
@@ -159,6 +201,21 @@ export type FlightPlan = {
   revision_id: number;
   assigned_transponder: string;
 };
+
+export async function debugFlightPlanTTL(key: string) {
+  const flightPlan = await redisService.getFlightPlan(key);
+  if (flightPlan) {
+    const ttl = await redisService.getRemainingTTL(key);
+    logger.debug(
+      `Flight Plan ${key} TTL: ${ttl}s, Last updated: ${new Date(
+        flightPlan.timestamp
+      ).toISOString()}`
+    );
+    return { flightPlan, ttl };
+  }
+  logger.debug(`Flight Plan ${key} not found in cache`);
+  return null;
+}
 /**
  *
  */

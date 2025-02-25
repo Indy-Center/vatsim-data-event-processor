@@ -10,7 +10,7 @@ const queues = {
 };
 
 const bindings = [
-  "vatsim.raw[raw.flight_plans] -> flight-plan-processor-queue",
+  "vatsim.raw[raw.pilots] -> flight-plan-processor-queue",
   "vatsim.raw[raw.prefiles] -> flight-plan-processor-queue",
 ];
 

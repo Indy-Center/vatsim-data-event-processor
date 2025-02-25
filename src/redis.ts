@@ -32,29 +32,86 @@ class RedisService {
   }
 
   async setFlightPlan(key: string, data: any) {
-    const fullKey = `flight-plan:${key}`;
-    await this.client.set(fullKey, JSON.stringify(data), {
+    // Store flight plan (without TTL)
+    await this.client.set(key, JSON.stringify(data));
+
+    // Set TTL key that references the flight plan key
+    await this.client.set(`ttl:${key}`, key, {
       EX: Math.floor(FLIGHT_PLAN_TTL / 1000), // Redis expects seconds
     });
-  }
-
-  async refreshTTL(key: string) {
-    const fullKey = `flight-plan:${key}`;
-    await this.client.expire(fullKey, Math.floor(FLIGHT_PLAN_TTL / 1000));
+    logger.debug(`Set flight plan and TTL for key: ${key}`);
   }
 
   async getFlightPlan(key: string) {
-    const data = await this.client.get(`flight-plan:${key}`);
+    const data = await this.client.get(key);
     return data ? JSON.parse(data) : null;
   }
 
-  async subscribeToExpiration(callback: (key: string) => void) {
-    // Subscribe to keyspace events for expiration
-    await this.subClient.subscribe("__keyevent@0__:expired", (message) => {
-      if (message.startsWith("flight-plan:")) {
-        callback(message.replace("flight-plan:", ""));
+  async refreshTTL(key: string) {
+    // Refresh TTL on the TTL key
+    const ttlKey = `ttl:${key}`;
+    const success = await this.client.expire(
+      ttlKey,
+      Math.floor(FLIGHT_PLAN_TTL / 1000)
+    );
+    if (!success) {
+      logger.debug(`Failed to refresh TTL for key: ${key} - TTL key not found`);
+      // If TTL key doesn't exist, recreate it
+      await this.client.set(ttlKey, key, {
+        EX: Math.floor(FLIGHT_PLAN_TTL / 1000),
+      });
+      logger.debug(`Recreated TTL key for: ${key}`);
+    } else {
+      logger.debug(`Refreshed TTL for key: ${key}`);
+    }
+  }
+
+  async subscribeToExpiration(callback: (key: string) => Promise<void>) {
+    await this.subClient.subscribe(
+      "__keyevent@0__:expired",
+      async (message: string) => {
+        logger.debug(`Received expiration for key: ${message}`);
+
+        // Only handle our TTL keys
+        if (!message.startsWith("ttl:")) {
+          return;
+        }
+
+        // Get the actual flight plan key from the TTL key
+        const flightPlanKey = message.substring(4); // Remove 'ttl:' prefix
+
+        // Get the flight plan data (it should still exist)
+        const data = await this.getFlightPlan(flightPlanKey);
+        if (data) {
+          logger.debug(
+            `Processing expiration for flight plan: ${flightPlanKey}`
+          );
+          // Process expiration
+          await callback(flightPlanKey);
+          // Clean up the flight plan data
+          await this.client.del(flightPlanKey);
+          logger.debug(`Cleaned up expired flight plan: ${flightPlanKey}`);
+        } else {
+          logger.debug(
+            `No data found for expired flight plan: ${flightPlanKey}`
+          );
+        }
       }
-    });
+    );
+  }
+
+  async getRemainingTTL(key: string): Promise<number> {
+    return await this.client.ttl(key);
+  }
+
+  async findKeysByPattern(pattern: string): Promise<string[]> {
+    return await this.client.keys(pattern);
+  }
+
+  async deleteFlightPlan(key: string) {
+    await this.client.del(key);
+    await this.client.del(`ttl:${key}`);
+    logger.debug(`Deleted flight plan and TTL for key: ${key}`);
   }
 }
 
