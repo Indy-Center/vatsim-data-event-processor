@@ -1,15 +1,7 @@
 import logger from "./logger";
 import { BrokerAsPromised } from "rascal";
 import rabbitConfig from "./rabbitConfig";
-import { addListener } from "./controllers";
-
-interface ControllerState {
-  data: any;
-  lastSeen: number;
-}
-
-const controllerCache: Record<string, ControllerState> = {};
-const GRACE_PERIOD = 1000 * 60 * 2; // 2 minutes grace period for reconnects
+import { addFlightPlanListener } from "./flight-plans";
 
 process.on("SIGINT", () => {
   logger.info("SIGINT received, shutting down...");
@@ -31,7 +23,13 @@ async function main() {
     logger.error(`Broker error: ${err}`);
   });
 
-  await addListener(await broker.subscribe("raw.controllers"), broker);
+  await addFlightPlanListener(
+    [
+      await broker.subscribe("raw.flight_plans"),
+      await broker.subscribe("raw.prefiles"),
+    ],
+    broker
+  );
 }
 
 main().catch((error) => {

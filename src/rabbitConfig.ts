@@ -2,33 +2,39 @@ import rascal, { BindingConfig } from "rascal";
 import { config } from "./config";
 
 const queues = {
-  "controller-processor-queue": {
+  "flight-plan-processor-queue": {
     options: {
       durable: true,
     },
   },
 };
 
-const bindings = ["vatsim.raw[raw.controllers] -> controller-processor-queue"];
+const bindings = [
+  "vatsim.raw[raw.flight_plans] -> flight-plan-processor-queue",
+  "vatsim.raw[raw.prefiles] -> flight-plan-processor-queue",
+];
 
 const subscriptions = {
-  "raw.controllers": {
-    queue: "controller-processor-queue",
+  "raw.flight_plans": {
+    queue: "flight-plan-processor-queue",
+  },
+  "raw.prefiles": {
+    queue: "flight-plan-processor-queue",
   },
 };
 
 const publications = {
-  "events.controller.connect": {
+  "events.flight_plan.file": {
     exchange: "vatsim.events",
-    routingKey: "events.controller.connect",
+    routingKey: "events.flight_plan.file",
   },
-  "events.controller.disconnect": {
+  "events.flight_plan.expire": {
     exchange: "vatsim.events",
-    routingKey: "events.controller.disconnect",
+    routingKey: "events.flight_plan.expire",
   },
-  "events.controller.update": {
+  "events.flight_plan.update": {
     exchange: "vatsim.events",
-    routingKey: "events.controller.update",
+    routingKey: "events.flight_plan.update",
   },
 };
 
