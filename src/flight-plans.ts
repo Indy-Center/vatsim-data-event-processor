@@ -2,9 +2,12 @@ import { BrokerAsPromised, SubscriberSessionAsPromised } from "rascal";
 import logger from "./logger";
 import { pick } from "lodash";
 
-const INACTIVE_FLIGHT_PLAN_TIMEOUT = 1000 * 60; // 1 minute
-const INACTIVE_FLIGHT_PLAN_CHECK_INTERVAL = 1000 * 30; // 30 seconds
-const FLIGHT_PLAN_CACHE: Cache<FlightPlan> = {};
+const INACTIVE_FLIGHT_PLAN_TIMEOUT = 1000 * 60 * 10; // 10 minutes
+const INACTIVE_FLIGHT_PLAN_CHECK_INTERVAL = 1000 * 60; // 1 minute
+const FLIGHT_PLAN_CACHE: Cache<{
+  pilot: { cid: number; callsign: string };
+  flightPlan: FlightPlan;
+}> = {};
 
 export async function addFlightPlanListener(
   subscriptions: SubscriberSessionAsPromised[],
@@ -17,9 +20,10 @@ export async function addFlightPlanListener(
     });
   }
 
-  // Check for inactive controllers every 10 seconds.
+  // Check for inactive flight plans periodically
   setInterval(async () => {
     logger.debug("Checking for inactive flight plans");
+    await checkForInactiveFlightPlans(broker);
   }, INACTIVE_FLIGHT_PLAN_CHECK_INTERVAL);
 }
 
@@ -32,36 +36,51 @@ export async function processRawFlightPlan(
   const flightPlan = pilot.flight_plan;
 
   if (cacheEntry) {
-    const changes = detectFlightPlanChanges(cacheEntry.value, flightPlan);
-    if (changes) {
-      logger.debug(`Flight Plan ${key} has changed. Publishing changes.`);
-      await broker.publish("events.flight_plan.update", {
-        event: "update",
-        data: {
-          original: cacheEntry.value,
-          updated: flightPlan,
-          updates: changes,
+    const hasChanges = detectFlightPlanChanges(
+      cacheEntry.value.flightPlan,
+      flightPlan
+    );
+    if (hasChanges) {
+      logger.debug(`Flight Plan ${key} has changed. Publishing update.`);
+      await publishFlightPlanEvent(
+        {
+          event: "update",
+          pilot: { cid: pilot.cid, callsign: pilot.callsign },
+          flight_plan: flightPlan,
+          timestamp: Date.now(),
         },
-        timestamp: Date.now(),
-      });
+        broker
+      );
 
       FLIGHT_PLAN_CACHE[key] = {
         timestamp: Date.now(),
-        value: flightPlan,
+        value: {
+          pilot: { cid: pilot.cid, callsign: pilot.callsign },
+          flightPlan,
+        },
       };
+    } else {
+      FLIGHT_PLAN_CACHE[key].timestamp = Date.now();
     }
   } else {
     logger.debug(`Flight Plan ${key} is not in cache. Adding to cache.`);
     FLIGHT_PLAN_CACHE[key] = {
       timestamp: Date.now(),
-      value: flightPlan,
+      value: {
+        pilot: { cid: pilot.cid, callsign: pilot.callsign },
+        flightPlan,
+      },
     };
 
-    await broker.publish("events.flight_plan.file", {
-      event: "file",
-      data: flightPlan,
-      timestamp: Date.now(),
-    });
+    await publishFlightPlanEvent(
+      {
+        event: "file",
+        pilot: { cid: pilot.cid, callsign: pilot.callsign },
+        flight_plan: flightPlan,
+        timestamp: Date.now(),
+      },
+      broker
+    );
   }
 }
 
@@ -74,28 +93,44 @@ async function checkForInactiveFlightPlans(broker: BrokerAsPromised) {
 
       delete FLIGHT_PLAN_CACHE[key];
 
-      await broker.publish("events.flight_plan.expire", {
-        event: "expire",
-        data: cacheEntry.value,
-        timestamp: now,
-      });
+      await publishFlightPlanEvent(
+        {
+          event: "expire",
+          pilot: cacheEntry.value.pilot,
+          flight_plan: cacheEntry.value.flightPlan,
+          timestamp: now,
+        },
+        broker
+      );
     }
   }
 }
 
-function detectFlightPlanChanges(original: FlightPlan, updated: FlightPlan) {
-  const changes = pick(
-    updated,
-    Object.keys(updated).filter(
-      (key) =>
-        original[key as keyof FlightPlan] !== updated[key as keyof FlightPlan]
-    )
-  );
+async function publishFlightPlanEvent(
+  event: FlightPlanEvent,
+  broker: BrokerAsPromised
+) {
+  await broker.publish(`events.flight_plan.${event.event}`, event);
+}
 
-  return Object.keys(changes).length > 0 ? changes : null;
+function detectFlightPlanChanges(original: FlightPlan, updated: FlightPlan) {
+  return Object.keys(updated).some(
+    (key) =>
+      original[key as keyof FlightPlan] !== updated[key as keyof FlightPlan]
+  );
 }
 
 type Cache<T> = Record<string, { timestamp: number; value: T }>;
+
+type FlightPlanEvent = {
+  event: "file" | "update" | "expire";
+  pilot: {
+    cid: number;
+    callsign: string;
+  };
+  flight_plan: FlightPlan;
+  timestamp: number;
+};
 
 export type Pilot = {
   cid: number;
