@@ -36,6 +36,10 @@ const publications = {
     exchange: "vatsim.events",
     routingKey: "events.flight_plan.update",
   },
+  "events.flight_plan.state_change": {
+    exchange: "vatsim.events",
+    routingKey: "events.flight_plan.state_change",
+  },
 };
 
 export default rascal.withDefaultConfig({
